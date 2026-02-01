@@ -27,4 +27,4 @@ AI-powered career tool: ATS score, CV optimization, portfolio generator & skills
 2. (Optional) Paste a job description for ATS analysis
 3. Hit **Analyze & Generate**
 4. Download your optimized CV, portfolio, and roadmap
-5. 
+   
