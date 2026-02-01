@@ -1,412 +1,435 @@
 import streamlit as st
 from utils import (
-    parse_cv, parse_linkedin, analyze_ats, 
-    generate_optimized_cv, generate_portfolio,
-    generate_skills_roadmap, parse_pdf, parse_txt
+    parse_cv,
+    parse_linkedin,
+    analyze_ats,
+    generate_optimized_cv,
+    generate_portfolio,
+    generate_skills_roadmap,
+    parse_pdf,
+    parse_txt,
 )
-import io
 
-# Page config
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
 st.set_page_config(
     page_title="CareerBoost AI",
     page_icon="🚀",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+    menu_items={
+        'About': 'CareerBoost AI — Free ATS optimization & portfolio generator.',
+    }
 )
 
-# Custom CSS
+# ─────────────────────────────────────────────
+# GLOBAL CSS
+# ─────────────────────────────────────────────
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 2rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        padding: 1rem 2rem;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-    }
-    .tip-box {
-        background-color: #f0f7ff;
-        border-left: 4px solid #4299e1;
-        padding: 1rem;
-        margin: 0.5rem 0;
-        border-radius: 4px;
-    }
+  /* hide default streamlit chrome */
+  #MainMenu, footer, .reportview-container .main .block-container > div:first-child { display:none !important; }
+
+  /* ── gradient header ── */
+  .cb-header {
+      text-align:center;
+      padding:1.6rem 0 .4rem;
+  }
+  .cb-header h1 {
+      font-size:2.8rem;
+      font-weight:800;
+      background:linear-gradient(90deg,#e94560,#c23152,#764ba2);
+      -webkit-background-clip:text;
+      -webkit-text-fill-color:transparent;
+      margin:0; line-height:1.15;
+  }
+  .cb-header p {
+      color:#7a7f8e; font-size:.95rem; margin-top:.35rem;
+  }
+
+  /* ── sidebar tweaks ── */
+  .stSidebar { background:#13151f !important; }
+  .stSidebar .stMarkdown h3 { color:#fff !important; }
+
+  /* ── score ring ── */
+  .score-ring {
+      width:140px; height:140px; margin:0 auto;
+      border-radius:50%;
+      display:flex; align-items:center; justify-content:center;
+      flex-direction:column;
+      font-family:'Segoe UI',sans-serif;
+  }
+  .score-ring .num { font-size:2.2rem; font-weight:800; color:#fff; }
+  .score-ring .lbl { font-size:.72rem; color:#aaa; text-transform:uppercase; letter-spacing:1px; }
+
+  /* ── tag pills ── */
+  .pill {
+      display:inline-block; padding:4px 12px; border-radius:20px;
+      font-size:.78rem; font-weight:600; margin:3px;
+  }
+  .pill-green  { background:#1a3a2a; color:#4ade80; }
+  .pill-red    { background:#3a1a1f; color:#f87171; }
+
+  /* ── tip card ── */
+  .tip-card {
+      background:#161923; border-left:3px solid #e94560;
+      border-radius:6px; padding:.85rem 1rem;
+      margin:.45rem 0; font-size:.88rem; color:#c8cad0;
+  }
+  .tip-card strong { color:#fff; }
+
+  /* ── download strip ── */
+  .dl-strip {
+      background:#1a1d27; border:1px solid #2a2d38;
+      border-radius:10px; padding:1rem 1.3rem;
+      display:flex; align-items:center; gap:1rem;
+      margin-top:1rem;
+  }
+  .dl-strip .dl-icon { font-size:1.6rem; }
+  .dl-strip .dl-text { font-size:.82rem; color:#7a7f8e; }
+  .dl-strip .dl-text strong { color:#e2e4e9; font-size:.9rem; }
 </style>
 """, unsafe_allow_html=True)
 
+
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
+def _fetch_job_from_url(url: str) -> str:
+    """Try to pull job description text from a URL."""
+    import requests
+    from bs4 import BeautifulSoup
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # strip scripts/styles
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
+            tag.decompose()
+        text = soup.get_text(separator='\n', strip=True)
+        # return a reasonable chunk
+        return '\n'.join(text.split('\n')[:200])
+    except Exception as e:
+        raise Exception(f"Could not fetch URL: {e}")
+
+
+def _score_color(score: int) -> str:
+    if score >= 75: return "linear-gradient(135deg,#16a34a,#22c55e)"
+    if score >= 50: return "linear-gradient(135deg,#ca8a04,#eab308)"
+    return "linear-gradient(135deg,#dc2626,#ef4444)"
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+
 def main():
-    # Header
-    st.markdown('<div class="main-header">🚀 CareerBoost AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sub-header">Transform Your Career with AI-Powered CV Optimization & Portfolio Generation</div>', unsafe_allow_html=True)
-    
-    # Sidebar
+    # ── Header ──
+    st.markdown('<div class="cb-header"><h1>🚀 CareerBoost AI</h1>'
+                '<p>ATS optimization • CV generation • Portfolio builder • Skills roadmap</p></div>',
+                unsafe_allow_html=True)
+
+    # ─── SIDEBAR ───────────────────────────────
     with st.sidebar:
-        st.header("📤 Upload Your Documents")
-        
-        # CV Upload
+        st.markdown("### 📄 Your Documents")
         cv_file = st.file_uploader(
-            "Upload CV/Resume",
-            type=['pdf', 'doc', 'docx', 'txt'],
-            help="Upload your CV in PDF, DOC, DOCX, or TXT format"
+            "Upload CV / Resume",
+            type=['pdf', 'docx', 'doc', 'txt'],
+            help="PDF, DOCX or TXT"
         )
-        
-        # LinkedIn URL
+
         linkedin_url = st.text_input(
-            "LinkedIn Profile URL (Optional)",
-            placeholder="https://linkedin.com/in/yourprofile",
-            help="Public LinkedIn profile URL"
+            "LinkedIn URL (optional)",
+            placeholder="https://linkedin.com/in/yourname",
+            help="Public profile only"
         )
-        
+
         st.markdown("---")
-        
-        # Job Description
-        st.subheader("🎯 Job Analysis (Optional)")
-        job_desc_option = st.radio(
-            "Job Description Input",
-            ["Paste Text", "Upload PDF", "Paste URL"]
-        )
-        
-        job_description = None
-        job_url = None
-        job_file = None
-        
-        if job_desc_option == "Paste Text":
-            job_description = st.text_area(
-                "Paste Job Description",
-                height=200,
-                placeholder="Paste the job description here..."
-            )
-        elif job_desc_option == "Upload PDF":
-            job_file = st.file_uploader(
-                "Upload Job Description PDF",
-                type=['pdf', 'txt'],
-                key="job_file"
-            )
+        st.markdown("### 🎯 Job Description (optional)")
+
+        job_mode = st.radio("Input method", ["Paste text", "Upload PDF", "Paste URL"], label_visibility="collapsed")
+
+        job_text_input = ""
+        job_file_input = None
+        job_url_input  = ""
+
+        if job_mode == "Paste text":
+            job_text_input = st.text_area("Job description", height=180, placeholder="Paste here…", label_visibility="collapsed")
+        elif job_mode == "Upload PDF":
+            job_file_input = st.file_uploader("Job desc PDF", type=['pdf', 'txt'], key="job_pdf", label_visibility="collapsed")
         else:
-            job_url = st.text_input(
-                "Job Posting URL",
-                placeholder="https://example.com/job/posting"
-            )
-        
+            job_url_input = st.text_input("Job posting URL", placeholder="https://…", label_visibility="collapsed")
+
         st.markdown("---")
-        
-        analyze_button = st.button("🚀 Analyze & Generate", type="primary", use_container_width=True)
-    
-    # Main content area
-    if not analyze_button:
-        # Welcome screen
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("""
-            ### 📊 ATS Optimization
-            - Get your ATS score (0-100%)
-            - Identify skill gaps
-            - Receive actionable tips
-            """)
-        
-        with col2:
-            st.markdown("""
-            ### 📄 CV Generation
-            - Create ATS-optimized CV
-            - Professional formatting
-            - Tailored to job requirements
-            """)
-        
-        with col3:
-            st.markdown("""
-            ### 🌐 Portfolio Website
-            - Beautiful HTML portfolio
-            - Responsive design
-            - Ready to deploy
-            """)
-        
-        st.info("👈 Upload your CV in the sidebar to get started!")
-        
-    else:
-        # Process inputs
-        if not cv_file and not linkedin_url:
-            st.error("⚠️ Please upload a CV or provide a LinkedIn URL to continue.")
-            return
-        
-        try:
-            with st.spinner("🔄 Processing your documents..."):
-                # Parse CV
-                cv_data = None
-                if cv_file:
-                    cv_data = parse_cv(cv_file)
-                    st.success("✅ CV parsed successfully!")
-                
-                # Parse LinkedIn (if provided)
-                linkedin_data = None
-                if linkedin_url:
-                    try:
-                        linkedin_data = parse_linkedin(linkedin_url)
-                        st.info("ℹ️ LinkedIn data extracted (limited due to access restrictions)")
-                        # Merge with CV data
-                        if cv_data and linkedin_data:
-                            cv_data['skills'] = list(set(cv_data['skills'] + linkedin_data.get('skills', [])))
-                    except Exception as e:
-                        st.warning(f"⚠️ {str(e)}")
-                
-                # Use CV data or LinkedIn data
-                final_data = cv_data if cv_data else linkedin_data
-                
-                if not final_data:
-                    st.error("❌ Unable to extract data from provided sources.")
-                    return
-                
-                # Parse job description
-                job_text = None
-                if job_description:
-                    job_text = job_description
-                elif job_file:
-                    if job_file.name.endswith('.pdf'):
-                        job_text = parse_pdf(job_file)
-                    else:
-                        job_text = parse_txt(job_file)
-                elif job_url:
-                    st.warning("⚠️ URL parsing for job descriptions is limited. Please paste the text instead.")
-                
-                # Create tabs
-                if job_text:
-                    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                        "📊 ATS Analysis", 
-                        "📄 Optimized CV", 
-                        "🌐 Portfolio", 
-                        "📚 Skills Roadmap",
-                        "📋 Extracted Data"
-                    ])
+        go = st.button("🚀  Analyze & Generate", type="primary", use_container_width=True)
+
+    # ─── WELCOME STATE ────────────────────────
+    if not go:
+        c1, c2, c3 = st.columns(3)
+        for col, title, icon, desc in [
+            (c1, "ATS Scoring", "📊", "Keyword-match score vs any job description. Pinpoint exactly what's missing."),
+            (c2, "CV Generation", "📄", "Download a clean, ATS-friendly PDF tailored to the role."),
+            (c3, "Portfolio Site", "🌐", "A responsive, deployable HTML portfolio — no coding needed."),
+        ]:
+            with col:
+                st.markdown(f"""
+                <div style="background:#1a1d27;border:1px solid #2a2d38;border-radius:12px;padding:1.6rem 1.2rem;height:100%;">
+                  <div style="font-size:2rem;margin-bottom:.5rem;">{icon}</div>
+                  <h4 style="color:#fff;margin-bottom:.4rem;">{title}</h4>
+                  <p style="color:#7a7f8e;font-size:.82rem;line-height:1.5;">{desc}</p>
+                </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br/>", unsafe_allow_html=True)
+        st.info("👈  Upload your CV (and optionally a job description) in the sidebar, then hit **Analyze & Generate**.")
+        return
+
+    # ─── VALIDATION ───────────────────────────
+    if not cv_file and not linkedin_url:
+        st.error("⚠️ Please upload a CV **or** provide a LinkedIn URL.")
+        return
+
+    # ─── PROCESSING ───────────────────────────
+    cv_data = None
+    job_text = None
+
+    with st.spinner("Parsing your documents…"):
+        # --- CV ---
+        if cv_file:
+            try:
+                cv_data = parse_cv(cv_file)
+            except Exception as e:
+                st.error(f"CV parse failed: {e}")
+                return
+
+        # --- LinkedIn ---
+        if linkedin_url:
+            try:
+                li_data = parse_linkedin(linkedin_url)
+                if cv_data:
+                    # merge skills
+                    cv_data['skills'] = list(dict.fromkeys(cv_data['skills'] + li_data.get('skills', [])))
                 else:
-                    tab1, tab2, tab3 = st.tabs([
-                        "📄 Optimized CV", 
-                        "🌐 Portfolio",
-                        "📋 Extracted Data"
-                    ])
-                
-                # ATS Analysis Tab (only if job description provided)
-                if job_text:
-                    with tab1:
-                        st.header("🎯 ATS Score & Analysis")
-                        
-                        with st.spinner("Analyzing ATS compatibility..."):
-                            ats_results = analyze_ats(final_data, job_text)
-                        
-                        # Score display
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            score = ats_results['score']
-                            score_color = "🟢" if score >= 70 else "🟡" if score >= 50 else "🔴"
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <h2>{score_color} {score}%</h2>
-                                <p>ATS Score</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col2:
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <h2>✅ {len(ats_results['matched_skills'])}</h2>
-                                <p>Matched Skills</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with col3:
-                            st.markdown(f"""
-                            <div class="metric-card">
-                                <h2>❌ {len(ats_results['missing_skills'])}</h2>
-                                <p>Missing Skills</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        st.markdown("---")
-                        
-                        # Matched Skills
-                        if ats_results['matched_skills']:
-                            st.subheader("✅ Your Matching Skills")
-                            skills_html = " ".join([f'<span style="background-color: #e6ffed; color: #22863a; padding: 5px 10px; border-radius: 5px; margin: 5px; display: inline-block;">{skill.title()}</span>' for skill in ats_results['matched_skills'][:15]])
-                            st.markdown(skills_html, unsafe_allow_html=True)
-                        
-                        st.markdown("---")
-                        
-                        # Missing Skills
-                        if ats_results['missing_skills']:
-                            st.subheader("❌ Skills to Add")
-                            skills_html = " ".join([f'<span style="background-color: #fff5f5; color: #c53030; padding: 5px 10px; border-radius: 5px; margin: 5px; display: inline-block;">{skill.title()}</span>' for skill in ats_results['missing_skills']])
-                            st.markdown(skills_html, unsafe_allow_html=True)
-                        
-                        st.markdown("---")
-                        
-                        # Tips
-                        st.subheader("💡 Improvement Tips")
-                        for i, tip in enumerate(ats_results['tips'], 1):
-                            st.markdown(f'<div class="tip-box"><strong>{i}.</strong> {tip}</div>', unsafe_allow_html=True)
-                
-                # Optimized CV Tab
-                cv_tab = tab2 if job_text else tab1
-                with cv_tab:
-                    st.header("📄 ATS-Optimized CV")
-                    
-                    with st.spinner("Generating your optimized CV..."):
-                        cv_pdf = generate_optimized_cv(final_data, job_text)
-                    
-                    st.success("✅ CV generated successfully!")
-                    
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.info("📥 Download your professionally formatted, ATS-optimized CV")
-                    with col2:
-                        st.download_button(
-                            label="📥 Download CV",
-                            data=cv_pdf,
-                            file_name="optimized_cv.pdf",
-                            mime="application/pdf",
-                            use_container_width=True
-                        )
-                    
-                    st.markdown("---")
-                    
-                    st.markdown("""
-                    ### ✨ What's Included:
-                    - Professional formatting optimized for ATS systems
-                    - Clear section headers and organization
-                    - Keyword-rich content based on your profile
-                    - Clean, modern design
-                    """)
-                
-                # Portfolio Tab
-                portfolio_tab = tab3 if job_text else tab2
-                with portfolio_tab:
-                    st.header("🌐 Professional Portfolio Website")
-                    
-                    with st.spinner("Building your portfolio website..."):
-                        portfolio_zip = generate_portfolio(final_data)
-                    
-                    st.success("✅ Portfolio generated successfully!")
-                    
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.info("📦 Download your complete portfolio website (HTML + Tailwind CSS)")
-                    with col2:
-                        st.download_button(
-                            label="📥 Download Portfolio",
-                            data=portfolio_zip,
-                            file_name="portfolio_website.zip",
-                            mime="application/zip",
-                            use_container_width=True
-                        )
-                    
-                    st.markdown("---")
-                    
-                    st.markdown("""
-                    ### 🎨 Portfolio Features:
-                    - **Responsive Design**: Works perfectly on all devices
-                    - **Modern UI**: Built with Tailwind CSS
-                    - **Sections Included**:
-                      - Hero section with your name
-                      - About Me
-                      - Skills showcase
-                      - Experience timeline
-                      - Contact information
-                    
-                    ### 🚀 Deployment Options (All FREE):
-                    1. **GitHub Pages**: Upload to GitHub and enable Pages
-                    2. **Netlify**: Drag & drop the folder
-                    3. **Vercel**: Connect your GitHub repo
-                    4. **Cloudflare Pages**: Simple drag & drop
-                    """)
-                
-                # Skills Roadmap Tab (only if job description provided)
-                if job_text:
-                    with tab4:
-                        st.header("📚 Personalized Learning Roadmap")
-                        
-                        if ats_results['missing_skills']:
-                            roadmap_md = generate_skills_roadmap(ats_results['missing_skills'])
-                            st.markdown(roadmap_md)
-                            
-                            # Download roadmap
-                            st.download_button(
-                                label="📥 Download Roadmap",
-                                data=roadmap_md,
-                                file_name="learning_roadmap.md",
-                                mime="text/markdown"
-                            )
-                        else:
-                            st.success("🎉 Great! Your skills align well with the job requirements!")
-                            st.info("Keep learning and stay updated with industry trends.")
-                
-                # Extracted Data Tab
-                data_tab = tab5 if job_text else tab3
-                with data_tab:
-                    st.header("📋 Extracted Information")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("👤 Personal Info")
-                        st.write(f"**Name:** {final_data.get('name', 'N/A')}")
-                        st.write(f"**Email:** {final_data.get('email', 'N/A')}")
-                        st.write(f"**Phone:** {final_data.get('phone', 'N/A')}")
-                    
-                    with col2:
-                        st.subheader("🎯 Skills Count")
-                        st.metric("Total Skills", len(final_data.get('skills', [])))
-                        st.metric("Experience Entries", len(final_data.get('experience', [])))
-                        st.metric("Education Entries", len(final_data.get('education', [])))
-                    
-                    st.markdown("---")
-                    
-                    # Skills
-                    if final_data.get('skills'):
-                        st.subheader("💼 Extracted Skills")
-                        skills_cols = st.columns(4)
-                        for i, skill in enumerate(final_data['skills']):
-                            with skills_cols[i % 4]:
-                                st.markdown(f"✓ {skill}")
-                    
-                    st.markdown("---")
-                    
-                    # Experience
-                    if final_data.get('experience'):
-                        st.subheader("🏢 Experience")
-                        for exp in final_data['experience']:
-                            with st.expander(exp.get('title', 'Experience')):
-                                st.write(exp.get('description', 'No description available'))
-                    
-                    st.markdown("---")
-                    
-                    # Education
-                    if final_data.get('education'):
-                        st.subheader("🎓 Education")
-                        for edu in final_data['education']:
-                            st.write(f"• {edu}")
-        
-        except Exception as e:
-            st.error(f"❌ An error occurred: {str(e)}")
-            st.info("Please check your inputs and try again.")
+                    cv_data = li_data
+                st.info("LinkedIn data merged. (LinkedIn limits public scraping — CV upload gives richer results.)")
+            except Exception as e:
+                st.warning(str(e))
+
+        if not cv_data:
+            st.error("No usable data extracted. Please upload your CV.")
+            return
+
+        # --- Job description ---
+        if job_text_input.strip():
+            job_text = job_text_input.strip()
+        elif job_file_input:
+            try:
+                if job_file_input.name.endswith('.pdf'):
+                    job_text = parse_pdf(job_file_input)
+                else:
+                    job_text = parse_txt(job_file_input)
+            except Exception as e:
+                st.error(f"Job PDF parse failed: {e}")
+                return
+        elif job_url_input.strip():
+            try:
+                job_text = _fetch_job_from_url(job_url_input.strip())
+            except Exception as e:
+                st.error(str(e))
+                return
+
+    # ─── BUILD TABS ───────────────────────────
+    ats_results = None
+    if job_text:
+        with st.spinner("Running ATS analysis…"):
+            ats_results = analyze_ats(cv_data, job_text)
+
+    # determine tab set
+    if ats_results:
+        tabs = st.tabs(["📊 ATS Analysis", "📄 Optimized CV", "🌐 Portfolio", "📚 Roadmap", "📋 Parsed Data"])
+        t_ats, t_cv, t_port, t_road, t_data = tabs
+    else:
+        tabs = st.tabs(["📄 Optimized CV", "🌐 Portfolio", "📋 Parsed Data"])
+        t_cv, t_port, t_data = tabs
+        t_ats = t_road = None
+
+    # ═══════════════════════════════════════════
+    # TAB 1 — ATS ANALYSIS
+    # ═══════════════════════════════════════════
+    if t_ats and ats_results:
+        with t_ats:
+            score = ats_results['score']
+            matched = ats_results['matched_skills']
+            missing = ats_results['missing_skills']
+            tips    = ats_results['tips']
+
+            # score ring + 2 counters
+            c1, c2, c3 = st.columns([1.2, 1, 1])
+            with c1:
+                st.markdown(f"""
+                <div class="score-ring" style="background:{_score_color(score)};">
+                  <div class="num">{score}%</div>
+                  <div class="lbl">ATS Score</div>
+                </div>""", unsafe_allow_html=True)
+            with c2:
+                st.metric("✅ Matched", len(matched), help="Keywords found in your CV")
+            with c3:
+                st.metric("❌ Missing", len(missing), help="Keywords absent from your CV")
+
+            st.markdown("---")
+
+            # matched pills
+            if matched:
+                st.markdown("**Matched Skills**")
+                st.markdown(" ".join(f'<span class="pill pill-green">{s.title()}</span>' for s in matched), unsafe_allow_html=True)
+                st.markdown("")
+
+            # missing pills
+            if missing:
+                st.markdown("**Skills to Add**")
+                st.markdown(" ".join(f'<span class="pill pill-red">{s.title()}</span>' for s in missing), unsafe_allow_html=True)
+                st.markdown("")
+
+            st.markdown("---")
+
+            # tips
+            st.markdown("### 💡 Improvement Tips")
+            for i, tip in enumerate(tips, 1):
+                st.markdown(f'<div class="tip-card"><strong>{i}.</strong> {tip}</div>', unsafe_allow_html=True)
+
+    # ═══════════════════════════════════════════
+    # TAB 2 — OPTIMIZED CV
+    # ═══════════════════════════════════════════
+    with t_cv:
+        with st.spinner("Generating ATS-optimized CV…"):
+            cv_pdf = generate_optimized_cv(cv_data, job_text)
+
+        st.markdown("""
+        <div class="dl-strip">
+          <div class="dl-icon">📄</div>
+          <div class="dl-text">
+            <strong>Optimized CV Ready</strong><br/>
+            Professional layout, keyword-rich, ATS-friendly PDF.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("")
+        st.download_button(
+            "⬇️  Download CV (PDF)",
+            data=cv_pdf,
+            file_name="optimized_cv.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+        st.markdown("---")
+        st.markdown("""
+        **What's included in the generated CV:**
+        - Clean two-colour header with contact info
+        - Professional Summary auto-generated from your skills
+        - Skills section (up to 16 keywords)
+        - Experience & Education pulled from your upload
+        - Consistent typography optimised for ATS parsers
+        """)
+
+    # ═══════════════════════════════════════════
+    # TAB 3 — PORTFOLIO
+    # ═══════════════════════════════════════════
+    with t_port:
+        with st.spinner("Building your portfolio…"):
+            port_zip = generate_portfolio(cv_data)
+
+        st.markdown("""
+        <div class="dl-strip">
+          <div class="dl-icon">🌐</div>
+          <div class="dl-text">
+            <strong>Portfolio Website Ready</strong><br/>
+            Single-file HTML + CSS. Deploy anywhere for free.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("")
+        st.download_button(
+            "⬇️  Download Portfolio (ZIP)",
+            data=port_zip,
+            file_name="portfolio.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+        st.markdown("---")
+        st.markdown("""
+        **Sections included:** Hero · About · Skills Grid · Experience Timeline · Education · Contact
+
+        **Free deployment options:**
+        1. **GitHub Pages** — push `index.html` to a repo, enable Pages → live URL
+        2. **Netlify** — drag & drop the folder on netlify.app
+        3. **Vercel** — connect your GitHub repo in one click
+        4. **Cloudflare Pages** — drag & drop, instant global CDN
+        """)
+
+    # ═══════════════════════════════════════════
+    # TAB 4 — ROADMAP
+    # ═══════════════════════════════════════════
+    if t_road and ats_results:
+        with t_road:
+            missing = ats_results['missing_skills']
+            if missing:
+                with st.spinner("Building roadmap…"):
+                    roadmap_md = generate_skills_roadmap(missing)
+                st.markdown(roadmap_md)
+                st.markdown("---")
+                st.download_button(
+                    "⬇️  Download Roadmap (Markdown)",
+                    data=roadmap_md,
+                    file_name="skills_roadmap.md",
+                    mime="text/markdown",
+                )
+            else:
+                st.success("🎉 Your skills are a strong match — no gaps detected!")
+
+    # ═══════════════════════════════════════════
+    # TAB 5 — PARSED DATA
+    # ═══════════════════════════════════════════
+    with t_data:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### 👤 Profile")
+            st.write(f"**Name:** {cv_data.get('name','—')}")
+            st.write(f"**Email:** {cv_data.get('email','—')}")
+            st.write(f"**Phone:** {cv_data.get('phone','—')}")
+        with c2:
+            st.markdown("#### 📊 Counts")
+            st.metric("Skills", len(cv_data.get('skills', [])))
+            st.metric("Experience entries", len(cv_data.get('experience', [])))
+            st.metric("Education entries", len(cv_data.get('education', [])))
+
+        st.markdown("---")
+
+        # skills
+        if cv_data.get('skills'):
+            st.markdown("#### 💼 Detected Skills")
+            cols = st.columns(5)
+            for i, s in enumerate(cv_data['skills']):
+                cols[i % 5].markdown(f"✓ {s}")
+
+        st.markdown("---")
+
+        # experience
+        if cv_data.get('experience'):
+            st.markdown("#### 🏢 Experience")
+            for exp in cv_data['experience']:
+                with st.expander(exp.get('title', 'Entry'), expanded=False):
+                    st.write(exp.get('description', 'No additional detail.'))
+
+        st.markdown("---")
+
+        # education
+        if cv_data.get('education'):
+            st.markdown("#### 🎓 Education")
+            for e in cv_data['education']:
+                st.write(f"• {e}")
+
 
 if __name__ == "__main__":
     main()
