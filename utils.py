@@ -5,535 +5,821 @@ from bs4 import BeautifulSoup
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
-import markdown2
+from reportlab.lib.colors import HexColor
 import re
-import json
-from typing import Dict, List, Tuple
 import io
 import zipfile
+import datetime
+from typing import Dict, List
+
+
+# ─────────────────────────────────────────────
+# FILE PARSING
+# ─────────────────────────────────────────────
 
 def parse_pdf(file) -> str:
-    """Extract text from PDF using PyMuPDF"""
     try:
-        pdf_bytes = file.read()
-        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pdf_bytes = file.read() if hasattr(file, 'read') else file
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         text = ""
-        for page_num in range(pdf_document.page_count):
-            page = pdf_document[page_num]
+        for page in doc:
             text += page.get_text()
-        pdf_document.close()
+        doc.close()
         return text.strip()
     except Exception as e:
-        raise Exception(f"Error parsing PDF: {str(e)}")
+        raise Exception(f"PDF parse error: {e}")
+
 
 def parse_docx(file) -> str:
-    """Extract text from DOCX"""
     try:
         doc = docx.Document(file)
-        text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-        return text.strip()
+        return "\n".join([p.text for p in doc.paragraphs]).strip()
     except Exception as e:
-        raise Exception(f"Error parsing DOCX: {str(e)}")
+        raise Exception(f"DOCX parse error: {e}")
+
 
 def parse_txt(file) -> str:
-    """Extract text from TXT"""
     try:
-        text = file.read().decode('utf-8')
-        return text.strip()
+        raw = file.read()
+        return (raw.decode('utf-8') if isinstance(raw, bytes) else raw).strip()
     except Exception as e:
-        raise Exception(f"Error parsing TXT: {str(e)}")
+        raise Exception(f"TXT parse error: {e}")
+
 
 def parse_cv(file) -> Dict:
-    """Parse CV and extract structured information"""
-    filename = file.name.lower()
-    
-    if filename.endswith('.pdf'):
+    name = file.name.lower()
+    if name.endswith('.pdf'):
         text = parse_pdf(file)
-    elif filename.endswith('.docx') or filename.endswith('.doc'):
+    elif name.endswith(('.docx', '.doc')):
         text = parse_docx(file)
-    elif filename.endswith('.txt'):
+    elif name.endswith('.txt'):
         text = parse_txt(file)
     else:
-        raise Exception("Unsupported file format. Please upload PDF, DOC, DOCX, or TXT.")
-    
-    # Extract structured data using regex patterns
-    data = {
+        raise Exception("Unsupported format. Use PDF, DOC, DOCX, or TXT.")
+
+    return {
         'raw_text': text,
-        'name': extract_name(text),
-        'email': extract_email(text),
-        'phone': extract_phone(text),
-        'skills': extract_skills(text),
-        'experience': extract_experience(text),
-        'education': extract_education(text)
+        'name': _extract_name(text),
+        'email': _extract_email(text),
+        'phone': _extract_phone(text),
+        'skills': _extract_skills(text),
+        'experience': _extract_experience(text),
+        'education': _extract_education(text),
     }
-    
-    return data
 
-def extract_name(text: str) -> str:
-    """Extract name from CV text (first line heuristic)"""
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if lines:
-        # Often the name is in the first few lines
-        for line in lines[:3]:
-            if len(line.split()) <= 4 and len(line) > 3 and not '@' in line:
+
+# ─────────────────────────────────────────────
+# EXTRACTION HELPERS
+# ─────────────────────────────────────────────
+
+def _extract_name(text: str) -> str:
+    for line in (l.strip() for l in text.split('\n') if l.strip()):
+        if 2 <= len(line.split()) <= 4 and '@' not in line and len(line) > 3:
+            # skip lines that look like headers or dates
+            if not re.match(r'(?i)(experience|education|skills|summary|objective|contact)', line):
                 return line
-    return "Not Found"
+    return "Professional"
 
-def extract_email(text: str) -> str:
-    """Extract email address"""
-    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    match = re.search(email_pattern, text)
-    return match.group(0) if match else "Not Found"
 
-def extract_phone(text: str) -> str:
-    """Extract phone number"""
-    phone_pattern = r'(\+?\d{1,3}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}'
-    match = re.search(phone_pattern, text)
-    return match.group(0) if match else "Not Found"
+def _extract_email(text: str) -> str:
+    m = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', text)
+    return m.group(0) if m else ""
 
-def extract_skills(text: str) -> List[str]:
-    """Extract skills using keyword matching"""
-    # Common skill keywords
-    skill_keywords = [
-        'python', 'java', 'javascript', 'react', 'angular', 'vue', 'node.js',
-        'sql', 'mongodb', 'postgresql', 'mysql', 'docker', 'kubernetes',
-        'aws', 'azure', 'gcp', 'git', 'machine learning', 'deep learning',
-        'tensorflow', 'pytorch', 'scikit-learn', 'pandas', 'numpy',
-        'html', 'css', 'bootstrap', 'tailwind', 'django', 'flask', 'fastapi',
-        'rest api', 'graphql', 'agile', 'scrum', 'ci/cd', 'jenkins',
-        'linux', 'bash', 'c++', 'c#', '.net', 'go', 'rust', 'typescript',
-        'express', 'spring boot', 'microservices', 'redis', 'elasticsearch'
-    ]
-    
-    text_lower = text.lower()
-    found_skills = []
-    
-    for skill in skill_keywords:
-        if skill in text_lower:
-            # Capitalize properly
-            found_skills.append(skill.title())
-    
-    # Remove duplicates and sort
-    return sorted(list(set(found_skills)))
 
-def extract_experience(text: str) -> List[Dict]:
-    """Extract work experience"""
-    experience = []
-    
-    # Look for common experience section headers
-    exp_patterns = [
-        r'(?i)(work experience|professional experience|employment history|experience)',
-        r'(?i)(work history)'
-    ]
-    
-    for pattern in exp_patterns:
-        match = re.search(pattern, text)
-        if match:
-            # Get text after the header
-            start_pos = match.end()
-            # Find next section (education, skills, etc.)
-            next_section = re.search(r'(?i)(education|skills|certifications|projects)', text[start_pos:])
-            end_pos = next_section.start() + start_pos if next_section else len(text)
-            
-            exp_text = text[start_pos:end_pos]
-            
-            # Extract individual experiences (simplified)
-            lines = [line.strip() for line in exp_text.split('\n') if line.strip()]
-            for i, line in enumerate(lines[:5]):  # Get first 5 entries
-                if len(line) > 10:
-                    experience.append({
-                        'title': line[:100],
-                        'description': lines[i+1] if i+1 < len(lines) else ""
-                    })
+def _extract_phone(text: str) -> str:
+    m = re.search(r'(\+?\d{1,3}[\-.\s]?)?(\(?\d{2,4}\)?[\-.\s]?)?\d{3,4}[\-.\s]?\d{4}', text)
+    return m.group(0) if m else ""
+
+
+SKILL_KEYWORDS = [
+    'python', 'java', 'javascript', 'typescript', 'react', 'angular', 'vue.js',
+    'node.js', 'express', 'next.js', 'nuxt', 'svelte',
+    'sql', 'mongodb', 'postgresql', 'mysql', 'redis', 'elasticsearch', 'cassandra',
+    'docker', 'kubernetes', 'terraform', 'ansible',
+    'aws', 'azure', 'gcp', 'google cloud',
+    'git', 'github', 'gitlab', 'bitbucket', 'ci/cd', 'jenkins', 'github actions',
+    'machine learning', 'deep learning', 'nlp', 'computer vision',
+    'tensorflow', 'pytorch', 'scikit-learn', 'pandas', 'numpy', 'matplotlib',
+    'html', 'css', 'sass', 'less', 'bootstrap', 'tailwind css', 'material ui',
+    'django', 'flask', 'fastapi', 'spring boot', 'laravel', 'ruby on rails',
+    'rest api', 'graphql', 'microservices', 'websocket',
+    'agile', 'scrum', 'kanban', 'jira', 'confluence',
+    'linux', 'bash', 'shell scripting', 'powershell',
+    'c++', 'c#', '.net', 'go', 'golang', 'rust', 'swift', 'kotlin',
+    'react native', 'flutter', 'xamarin',
+    'kafka', 'rabbitmq', 'celery', 'aws lambda',
+    'power bi', 'tableau', 'excel', 'data analysis', 'data science',
+    'project management', 'leadership', 'communication', 'teamwork',
+    'problem solving', 'critical thinking', 'time management',
+    'figma', 'adobe xd', 'ui/ux', 'wireframing', 'prototyping',
+    'aws s3', 'ec2', 'dynamodb', 'azure devops',
+]
+
+
+def _extract_skills(text: str) -> List[str]:
+    lower = text.lower()
+    found = []
+    for kw in SKILL_KEYWORDS:
+        if kw in lower:
+            found.append(kw.title())
+    # deduplicate, preserve order
+    seen = set()
+    unique = []
+    for s in found:
+        if s not in seen:
+            seen.add(s)
+            unique.append(s)
+    return sorted(unique)
+
+
+def _extract_experience(text: str) -> List[Dict]:
+    exp_header = re.search(
+        r'(?i)(work\s*experience|professional\s*experience|employment|experience\s*&?\s*history)',
+        text
+    )
+    if not exp_header:
+        return [{'title': 'Professional Experience', 'description': 'See CV for details.'}]
+
+    start = exp_header.end()
+    next_sec = re.search(r'(?i)\n(education|skills|certifications|projects|awards)', text[start:])
+    chunk = text[start: start + next_sec.start() if next_sec else len(text)]
+
+    entries = []
+    for line in (l.strip() for l in chunk.split('\n') if l.strip()):
+        if len(line) > 8:
+            entries.append({'title': line[:120], 'description': ''})
+        if len(entries) >= 5:
             break
-    
-    return experience if experience else [{'title': 'Experience details found in CV', 'description': ''}]
 
-def extract_education(text: str) -> List[str]:
-    """Extract education information"""
-    education = []
-    
-    # Common degree keywords
-    degree_keywords = [
-        r"bachelor['\"]?s?", r"master['\"]?s?", r"phd", r"doctorate",
-        r"b\.?s\.?", r"m\.?s\.?", r"b\.?a\.?", r"m\.?a\.?", r"mba"
-    ]
-    
-    text_lower = text.lower()
-    
-    for keyword in degree_keywords:
-        matches = re.finditer(keyword, text_lower)
-        for match in matches:
-            # Get context around the match
-            start = max(0, match.start() - 50)
-            end = min(len(text), match.end() + 100)
-            context = text[start:end].strip()
-            education.append(context)
-    
-    return education if education else ["Education details found in CV"]
+    # pair up title / description
+    paired = []
+    i = 0
+    while i < len(entries):
+        title = entries[i]['title']
+        desc = entries[i + 1]['title'] if i + 1 < len(entries) and len(entries[i + 1]['title']) > 20 else ''
+        paired.append({'title': title, 'description': desc})
+        i += 2 if desc else 1
+
+    return paired if paired else [{'title': 'Professional Experience', 'description': 'See CV for details.'}]
+
+
+def _extract_education(text: str) -> List[str]:
+    edu = []
+    for kw in [r"bachelor", r"master", r"phd", r"doctorate", r"b\.?s\.?", r"m\.?s\.?", r"b\.?a\.?", r"m\.?a\.?", r"mba"]:
+        for m in re.finditer(kw, text, re.IGNORECASE):
+            ctx = text[max(0, m.start() - 40): min(len(text), m.end() + 120)].strip()
+            edu.append(ctx)
+    return edu if edu else ["Education details in CV"]
+
+
+# ─────────────────────────────────────────────
+# LINKEDIN (limited — public pages only)
+# ─────────────────────────────────────────────
 
 def parse_linkedin(url: str) -> Dict:
-    """Parse public LinkedIn profile (basic info only - no login)"""
+    if 'linkedin.com' not in url:
+        raise Exception("Please provide a valid linkedin.com URL.")
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        # LinkedIn blocks most scraping; extract what's in the og/meta tags
+        name = (soup.find('meta', {'property': 'og:title'}) or {}).get('content', 'LinkedIn User')
+        desc = (soup.find('meta', {'property': 'og:description'}) or {}).get('content', '')
+
+        # pull any visible skill-like text
+        body_text = soup.get_text(separator=' ', strip=True)
+        skills = _extract_skills(body_text)
+
+        return {
+            'name': name.split('|')[0].strip() if name else 'LinkedIn User',
+            'email': '',
+            'phone': '',
+            'skills': skills if skills else ['Communication', 'Teamwork', 'Leadership'],
+            'experience': [{'title': 'See LinkedIn for full experience', 'description': desc[:200]}],
+            'education': ['See LinkedIn for education details'],
+            'raw_text': body_text,
+            'note': 'LinkedIn limits automated access. Upload your CV for full analysis.'
         }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # LinkedIn blocks scraping, so we get limited info
-        # This is a simplified version - real implementation would need more robust parsing
-        
-        data = {
-            'name': 'LinkedIn Profile',
-            'headline': 'Professional Profile',
-            'skills': ['LinkedIn', 'Professional Networking', 'Communication'],
-            'experience': [{'title': 'See LinkedIn profile for details', 'description': ''}],
-            'education': ['See LinkedIn profile for details'],
-            'note': 'LinkedIn limits public data access. Please upload your CV for detailed analysis.'
-        }
-        
-        return data
-        
-    except Exception as e:
-        raise Exception(f"Error parsing LinkedIn URL: {str(e)}. LinkedIn restricts automated access. Please upload your CV instead.")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Could not reach LinkedIn ({e}). Paste your CV instead.")
+
+
+# ─────────────────────────────────────────────
+# ATS ANALYSIS
+# ─────────────────────────────────────────────
 
 def analyze_ats(cv_data: Dict, job_description: str) -> Dict:
-    """Analyze ATS score and provide recommendations"""
-    cv_text = cv_data.get('raw_text', '').lower()
-    job_text = job_description.lower()
-    
-    # Extract keywords from job description
-    job_keywords = extract_job_keywords(job_text)
-    cv_skills = [skill.lower() for skill in cv_data.get('skills', [])]
-    
-    # Calculate matching score
-    matched_keywords = []
-    missing_keywords = []
-    
-    for keyword in job_keywords:
-        if keyword in cv_text or keyword in ' '.join(cv_skills):
-            matched_keywords.append(keyword)
+    cv_lower = cv_data.get('raw_text', '').lower()
+    job_lower = job_description.lower()
+
+    job_kws = _extract_job_keywords(job_lower)
+    matched, missing = [], []
+
+    for kw in job_kws:
+        if kw in cv_lower:
+            matched.append(kw)
         else:
-            missing_keywords.append(keyword)
-    
-    # Calculate ATS score
-    if job_keywords:
-        ats_score = int((len(matched_keywords) / len(job_keywords)) * 100)
-    else:
-        ats_score = 50
-    
-    # Generate tips
-    tips = generate_tips(cv_data, missing_keywords, cv_text)
-    
+            missing.append(kw)
+
+    score = round((len(matched) / len(job_kws)) * 100) if job_kws else 50
+    # clamp
+    score = max(0, min(100, score))
+
+    tips = _generate_tips(cv_data, missing, cv_lower)
+
     return {
-        'score': ats_score,
-        'matched_skills': matched_keywords,
-        'missing_skills': missing_keywords[:10],  # Top 10 missing
-        'tips': tips
+        'score': score,
+        'matched_skills': matched,
+        'missing_skills': missing[:10],
+        'tips': tips,
     }
 
-def extract_job_keywords(job_text: str) -> List[str]:
-    """Extract important keywords from job description"""
-    # Common technical and professional keywords
-    all_keywords = [
-        'python', 'java', 'javascript', 'react', 'angular', 'vue', 'node.js',
-        'sql', 'mongodb', 'postgresql', 'docker', 'kubernetes', 'aws', 'azure',
-        'machine learning', 'data analysis', 'agile', 'scrum', 'git',
-        'leadership', 'communication', 'teamwork', 'problem solving',
-        'project management', 'rest api', 'microservices', 'ci/cd',
-        'typescript', 'html', 'css', 'flask', 'django', 'spring boot',
-        'tensorflow', 'pytorch', 'pandas', 'numpy', 'excel', 'tableau',
-        'power bi', 'linux', 'bash', 'redis', 'elasticsearch', 'kafka'
-    ]
-    
-    found_keywords = []
-    for keyword in all_keywords:
-        if keyword in job_text:
-            found_keywords.append(keyword)
-    
-    # Also extract years of experience requirements
-    exp_match = re.search(r'(\d+)\+?\s*years?', job_text)
-    if exp_match:
-        found_keywords.append(f"{exp_match.group(1)}+ years experience")
-    
-    return found_keywords
 
-def generate_tips(cv_data: Dict, missing_skills: List[str], cv_text: str) -> List[str]:
-    """Generate actionable improvement tips"""
+def _extract_job_keywords(job_text: str) -> List[str]:
+    found = []
+    for kw in SKILL_KEYWORDS:
+        if kw in job_text:
+            found.append(kw)
+    # also grab "X+ years"
+    for m in re.finditer(r'(\d+)\+?\s*years?', job_text):
+        found.append(f"{m.group(1)}+ years experience")
+    return found
+
+
+def _generate_tips(cv_data: Dict, missing: List[str], cv_lower: str) -> List[str]:
     tips = []
-    
-    # Skill gaps
-    if missing_skills:
-        top_missing = missing_skills[:3]
-        for skill in top_missing:
-            tips.append(f"Add '{skill.title()}' skill - Learn via freeCodeCamp or Coursera (2-4 hours)")
-    
-    # CV structure tips
-    if 'projects' not in cv_text and 'project' not in cv_text:
-        tips.append("Add a 'Projects' section to showcase practical experience")
-    
-    if 'achievement' not in cv_text and 'accomplish' not in cv_text:
-        tips.append("Include quantifiable achievements (e.g., 'Increased efficiency by 30%')")
-    
-    if len(cv_data.get('skills', [])) < 5:
-        tips.append("Expand your skills section with both technical and soft skills")
-    
-    if 'certification' not in cv_text:
-        tips.append("Add relevant certifications to boost credibility")
-    
-    # Action verb check
-    action_verbs = ['developed', 'created', 'managed', 'led', 'designed', 'implemented']
-    if not any(verb in cv_text for verb in action_verbs):
-        tips.append("Use strong action verbs (Developed, Led, Implemented) in experience descriptions")
-    
-    return tips[:8]  # Return top 8 tips
 
-def generate_optimized_cv(cv_data: Dict, job_description: str = None) -> bytes:
-    """Generate ATS-optimized CV as PDF"""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
-    story = []
-    styles = getSampleStyleSheet()
-    
-    # Custom styles
-    title_style = ParagraphStyle(
-        'CustomTitle',
-        parent=styles['Heading1'],
-        fontSize=24,
-        textColor='#2C3E50',
-        spaceAfter=6,
-        alignment=TA_CENTER,
-        fontName='Helvetica-Bold'
-    )
-    
-    heading_style = ParagraphStyle(
-        'CustomHeading',
-        parent=styles['Heading2'],
-        fontSize=14,
-        textColor='#34495E',
-        spaceAfter=6,
-        spaceBefore=12,
-        fontName='Helvetica-Bold'
-    )
-    
-    normal_style = ParagraphStyle(
-        'CustomNormal',
-        parent=styles['Normal'],
-        fontSize=10,
-        spaceAfter=6,
-        fontName='Helvetica'
-    )
-    
-    # Header
-    name = cv_data.get('name', 'Professional Resume')
-    story.append(Paragraph(name, title_style))
-    
-    contact_info = f"{cv_data.get('email', '')} | {cv_data.get('phone', '')}"
-    story.append(Paragraph(contact_info, normal_style))
-    story.append(Spacer(1, 0.2*inch))
-    
-    # Professional Summary
-    story.append(Paragraph("PROFESSIONAL SUMMARY", heading_style))
-    summary = "Results-driven professional with proven expertise in delivering high-quality solutions. "
-    summary += f"Skilled in {', '.join(cv_data.get('skills', [])[:5])}. "
-    summary += "Committed to continuous learning and excellence in every project."
-    story.append(Paragraph(summary, normal_style))
-    story.append(Spacer(1, 0.15*inch))
-    
-    # Skills
-    if cv_data.get('skills'):
-        story.append(Paragraph("SKILLS", heading_style))
-        skills_text = " • ".join(cv_data['skills'][:15])
-        story.append(Paragraph(skills_text, normal_style))
-        story.append(Spacer(1, 0.15*inch))
-    
-    # Experience
-    if cv_data.get('experience'):
-        story.append(Paragraph("PROFESSIONAL EXPERIENCE", heading_style))
-        for exp in cv_data['experience'][:4]:
-            story.append(Paragraph(f"<b>{exp.get('title', '')}</b>", normal_style))
-            if exp.get('description'):
-                story.append(Paragraph(f"• {exp['description']}", normal_style))
-        story.append(Spacer(1, 0.15*inch))
-    
-    # Education
-    if cv_data.get('education'):
-        story.append(Paragraph("EDUCATION", heading_style))
-        for edu in cv_data['education'][:3]:
-            story.append(Paragraph(edu, normal_style))
-    
-    # Build PDF
-    doc.build(story)
-    buffer.seek(0)
-    return buffer.getvalue()
+    # top missing skills with free resources
+    resource_map = {
+        'docker': 'Docker Official Docs + Play With Docker (free)',
+        'aws': 'AWS Free Tier + freeCodeCamp AWS Course',
+        'kubernetes': 'Kubernetes.io Interactive Tutorial (free)',
+        'python': 'Python.org Tutorial + freeCodeCamp',
+        'javascript': 'freeCodeCamp + JavaScript.info',
+        'react': 'React.dev official tutorial (free)',
+        'sql': 'SQLBolt + W3Schools SQL',
+        'git': 'GitHub Learning Lab (free)',
+        'typescript': 'TypeScript Handbook (official, free)',
+        'machine learning': 'Andrew Ng ML Course on Coursera (audit free)',
+    }
+    for skill in missing[:4]:
+        res = resource_map.get(skill.lower(), 'YouTube tutorials + freeCodeCamp')
+        tips.append(f"Add \"{skill.title()}\" — Learn via: {res} (~2-4 hrs)")
 
-def generate_portfolio(cv_data: Dict) -> bytes:
-    """Generate portfolio website as HTML/ZIP with Tailwind CSS"""
-    
-    # Generate HTML
-    html_content = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{cv_data.get('name', 'Professional Portfolio')}</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(20px); }}
-            to {{ opacity: 1; transform: translateY(0); }}
-        }}
-        .fade-in {{ animation: fadeIn 0.6s ease-out; }}
-    </style>
-</head>
-<body class="bg-gray-50">
-    <!-- Navigation -->
-    <nav class="bg-white shadow-lg fixed w-full z-10">
-        <div class="max-w-6xl mx-auto px-4">
-            <div class="flex justify-between items-center py-4">
-                <div class="text-2xl font-bold text-blue-600">{cv_data.get('name', 'Portfolio')}</div>
-                <div class="hidden md:flex space-x-6">
-                    <a href="#about" class="text-gray-700 hover:text-blue-600 transition">About</a>
-                    <a href="#skills" class="text-gray-700 hover:text-blue-600 transition">Skills</a>
-                    <a href="#experience" class="text-gray-700 hover:text-blue-600 transition">Experience</a>
-                    <a href="#contact" class="text-gray-700 hover:text-blue-600 transition">Contact</a>
-                </div>
-            </div>
-        </div>
-    </nav>
+    if 'project' not in cv_lower:
+        tips.append("Add a 'Projects' section — concrete examples boost ATS and recruiter trust.")
+    if not any(v in cv_lower for v in ['increased', 'improved', 'reduced', 'grew', '%']):
+        tips.append("Include quantifiable achievements (e.g., 'Reduced load time by 40%').")
+    if 'certification' not in cv_lower and 'certified' not in cv_lower:
+        tips.append("Add certifications — even free ones (Google, AWS, Meta) add credibility.")
+    if not any(v in cv_lower for v in ['developed', 'led', 'designed', 'built', 'implemented']):
+        tips.append("Use strong action verbs: Developed, Led, Architected, Implemented.")
+    if len(cv_data.get('skills', [])) < 6:
+        tips.append("Expand your Skills section — aim for 8-12 listed skills.")
 
-    <!-- Hero Section -->
-    <section class="pt-32 pb-20 bg-gradient-to-r from-blue-500 to-purple-600 text-white">
-        <div class="max-w-6xl mx-auto px-4 text-center fade-in">
-            <h1 class="text-5xl md:text-6xl font-bold mb-4">{cv_data.get('name', 'Professional Portfolio')}</h1>
-            <p class="text-xl md:text-2xl mb-8">Passionate Developer | Problem Solver | Innovator</p>
-            <a href="#contact" class="bg-white text-blue-600 px-8 py-3 rounded-full font-semibold hover:bg-gray-100 transition">Get In Touch</a>
-        </div>
-    </section>
+    return tips[:8]
 
-    <!-- About Section -->
-    <section id="about" class="py-20">
-        <div class="max-w-6xl mx-auto px-4">
-            <h2 class="text-4xl font-bold text-center mb-12 text-gray-800">About Me</h2>
-            <div class="bg-white rounded-lg shadow-lg p-8 fade-in">
-                <p class="text-lg text-gray-700 leading-relaxed">
-                    Results-driven professional with expertise in modern technologies and a passion for creating 
-                    innovative solutions. Committed to continuous learning and delivering high-quality work that 
-                    exceeds expectations. Strong background in {', '.join(cv_data.get('skills', ['software development'])[:3])}.
-                </p>
-            </div>
-        </div>
-    </section>
 
-    <!-- Skills Section -->
-    <section id="skills" class="py-20 bg-gray-100">
-        <div class="max-w-6xl mx-auto px-4">
-            <h2 class="text-4xl font-bold text-center mb-12 text-gray-800">Skills & Expertise</h2>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {''.join([f'<div class="bg-white rounded-lg shadow p-4 text-center hover:shadow-lg transition"><span class="text-blue-600 font-semibold">{skill}</span></div>' for skill in cv_data.get('skills', ['Python', 'JavaScript', 'React', 'Node.js'])[:12]])}
-            </div>
-        </div>
-    </section>
+# ─────────────────────────────────────────────
+# SKILLS ROADMAP
+# ─────────────────────────────────────────────
 
-    <!-- Experience Section -->
-    <section id="experience" class="py-20">
-        <div class="max-w-6xl mx-auto px-4">
-            <h2 class="text-4xl font-bold text-center mb-12 text-gray-800">Experience</h2>
-            <div class="space-y-6">
-                {''.join([f'''<div class="bg-white rounded-lg shadow-lg p-6 hover:shadow-xl transition">
-                    <h3 class="text-xl font-bold text-gray-800 mb-2">{exp.get('title', 'Professional Experience')}</h3>
-                    <p class="text-gray-600">{exp.get('description', 'Delivered exceptional results in a professional environment.')}</p>
-                </div>''' for exp in cv_data.get('experience', [{'title': 'Professional Experience', 'description': 'Proven track record of success'}])[:4]])}
-            </div>
-        </div>
-    </section>
+ROADMAP_DB = {
+    'python':          {'weeks': '3-5', 'resources': ['Python.org Tutorial', 'freeCodeCamp Python', 'Codecademy']},
+    'javascript':      {'weeks': '4-6', 'resources': ['freeCodeCamp JS', 'JavaScript.info', 'MDN Web Docs']},
+    'typescript':      {'weeks': '2-3', 'resources': ['TypeScript Handbook', 'freeCodeCamp TS', 'Udemy (free coupons)']},
+    'react':           {'weeks': '3-4', 'resources': ['React.dev Tutorial', 'freeCodeCamp React', 'Scrimba (free tier)']},
+    'node.js':         {'weeks': '3-4', 'resources': ['Node.js Docs', 'freeCodeCamp Node', 'The Odin Project']},
+    'docker':          {'weeks': '2-3', 'resources': ['Docker Docs', 'Play With Docker', 'YouTube: Docker in 1 Hr']},
+    'kubernetes':      {'weeks': '4-6', 'resources': ['Kubernetes.io Tutorial', 'KodeKloud (free)', 'CNCF Landscape']},
+    'aws':             {'weeks': '6-8', 'resources': ['AWS Free Tier', 'freeCodeCamp AWS', 'A Cloud Guru (free tier)']},
+    'azure':           {'weeks': '5-7', 'resources': ['Microsoft Learn', 'Azure Free Tier', 'YouTube: Azure in 1 Hr']},
+    'gcp':             {'weeks': '5-7', 'resources': ['Google Cloud Skills Boost', 'GCP Free Tier', 'Qwiklabs']},
+    'sql':             {'weeks': '2-3', 'resources': ['SQLBolt', 'W3Schools SQL', 'Khan Academy']},
+    'git':             {'weeks': '1-2', 'resources': ['Git-SCM.com', 'GitHub Learning Lab', 'Atlassian Git Tutorial']},
+    'machine learning':{'weeks': '8-12','resources': ['Andrew Ng ML (Coursera audit)', 'fast.ai', 'Kaggle Learn']},
+    'data science':    {'weeks': '6-8', 'resources': ['Kaggle Learn', 'freeCodeCamp Data Science', 'pandas Docs']},
+    'ci/cd':           {'weeks': '2-3', 'resources': ['GitHub Actions Docs', 'Jenkins Tutorials', 'GitLab CI Docs']},
+    'linux':           {'weeks': '3-4', 'resources': ['The Linux Command Line (book)', 'Over The Wire Bandit', 'Linux Journey']},
+}
 
-    <!-- Contact Section -->
-    <section id="contact" class="py-20 bg-gradient-to-r from-purple-600 to-blue-500 text-white">
-        <div class="max-w-6xl mx-auto px-4 text-center">
-            <h2 class="text-4xl font-bold mb-8">Let's Connect</h2>
-            <p class="text-xl mb-8">Interested in working together? Reach out!</p>
-            <div class="space-y-4">
-                <p class="text-lg">📧 Email: {cv_data.get('email', 'contact@example.com')}</p>
-                <p class="text-lg">📱 Phone: {cv_data.get('phone', 'Available upon request')}</p>
-            </div>
-        </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="bg-gray-800 text-white py-8">
-        <div class="max-w-6xl mx-auto px-4 text-center">
-            <p>&copy; 2026 {cv_data.get('name', 'Portfolio')}. All rights reserved.</p>
-            <p class="text-sm text-gray-400 mt-2">Generated by CareerBoost AI</p>
-        </div>
-    </footer>
-</body>
-</html>"""
-    
-    # Create ZIP file with HTML
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        zip_file.writestr('index.html', html_content)
-        
-        # Add a README
-        readme = f"""# {cv_data.get('name', 'Professional')} Portfolio
-
-This is a professional portfolio website generated by CareerBoost AI.
-
-## How to Use
-
-1. Extract this ZIP file
-2. Open `index.html` in your web browser
-3. To deploy online:
-   - Upload to GitHub Pages (free)
-   - Deploy to Netlify (free)
-   - Deploy to Vercel (free)
-
-## Customization
-
-Feel free to edit the HTML file to customize colors, content, and styling.
-
-Generated on: {import datetime; datetime.datetime.now().strftime('%Y-%m-%d')}
-"""
-        zip_file.writestr('README.md', readme)
-    
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
 
 def generate_skills_roadmap(missing_skills: List[str]) -> str:
-    """Generate a learning roadmap for missing skills"""
-    roadmap = "# Skills Development Roadmap\n\n"
-    
-    # Learning resources mapping
-    resources = {
-        'python': {'time': '4-6 weeks', 'resources': ['Python.org Tutorial', 'freeCodeCamp', 'Codecademy']},
-        'javascript': {'time': '4-6 weeks', 'resources': ['freeCodeCamp', 'JavaScript.info', 'MDN Web Docs']},
-        'react': {'time': '3-4 weeks', 'resources': ['React.dev', 'freeCodeCamp', 'Scrimba']},
-        'docker': {'time': '2-3 weeks', 'resources': ['Docker Docs', 'Docker Tutorial for Beginners', 'KodeKloud']},
-        'aws': {'time': '6-8 weeks', 'resources': ['AWS Free Tier', 'freeCodeCamp AWS Course', 'A Cloud Guru']},
-        'sql': {'time': '2-3 weeks', 'resources': ['SQLBolt', 'W3Schools SQL', 'Khan Academy']},
-        'git': {'time': '1-2 weeks', 'resources': ['Git-SCM.com', 'GitHub Learning Lab', 'Atlassian Git Tutorial']},
-    }
-    
+    md = "# 📚 Personalized Skills Roadmap\n\n"
+    md += f"*Generated on {datetime.datetime.now().strftime('%B %d, %Y')}*\n\n"
+    md += "---\n\n"
+
     for i, skill in enumerate(missing_skills[:8], 1):
-        skill_lower = skill.lower()
-        skill_info = resources.get(skill_lower, {'time': '2-4 weeks', 'resources': ['Google Search', 'YouTube Tutorials', 'Udemy']})
-        
-        roadmap += f"## {i}. {skill.title()}\n\n"
-        roadmap += f"**Estimated Time:** {skill_info['time']}\n\n"
-        roadmap += "**Free Resources:**\n"
-        for resource in skill_info['resources']:
-            roadmap += f"- {resource}\n"
-        roadmap += "\n**Action Steps:**\n"
-        roadmap += f"1. Complete beginner tutorial (Week 1)\n"
-        roadmap += f"2. Build a small project using {skill.title()} (Week 2)\n"
-        roadmap += f"3. Add project to your CV and GitHub\n\n"
-        roadmap += "---\n\n"
-    
-    return roadmap
+        info = ROADMAP_DB.get(skill.lower(), {'weeks': '2-4', 'resources': ['YouTube Tutorials', 'freeCodeCamp', 'Udemy (free coupons)']})
+        md += f"## {i}. {skill.title()}\n\n"
+        md += f"⏱️ **Estimated Time:** {info['weeks']} weeks\n\n"
+        md += "📖 **Free Resources:**\n"
+        for r in info['resources']:
+            md += f"  - {r}\n"
+        md += "\n✅ **Action Plan:**\n"
+        md += f"  1. **Week 1** — Complete a beginner tutorial on {skill.title()}\n"
+        md += f"  2. **Week 2** — Build a small hands-on project using {skill.title()}\n"
+        md += f"  3. **Week 3+** — Add the project to your GitHub & update your CV\n\n"
+        md += "---\n\n"
+
+    md += "> 💡 **Tip:** Focus on 2-3 skills at a time. Consistency beats intensity.\n"
+    return md
+
+
+# ─────────────────────────────────────────────
+# CV PDF GENERATION (ReportLab)
+# ─────────────────────────────────────────────
+
+def generate_optimized_cv(cv_data: Dict, job_description: str = None) -> bytes:
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        topMargin=0.55 * inch, bottomMargin=0.5 * inch,
+        leftMargin=0.65 * inch, rightMargin=0.65 * inch
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    # ── colour palette ──
+    dark = HexColor('#1a1a2e')
+    accent = HexColor('#e94560')
+    mid = HexColor('#16213e')
+    grey = HexColor('#555555')
+
+    # ── custom styles ──
+    name_style = ParagraphStyle('Name', parent=styles['Normal'],
+                                fontSize=26, textColor=dark, alignment=TA_CENTER,
+                                fontName='Helvetica-Bold', spaceAfter=2)
+    contact_style = ParagraphStyle('Contact', parent=styles['Normal'],
+                                   fontSize=9, textColor=grey, alignment=TA_CENTER,
+                                   fontName='Helvetica', spaceAfter=4)
+    section_style = ParagraphStyle('Section', parent=styles['Normal'],
+                                   fontSize=11, textColor=accent,
+                                   fontName='Helvetica-Bold', spaceBefore=10, spaceAfter=4)
+    body_style = ParagraphStyle('Body', parent=styles['Normal'],
+                                fontSize=9.5, textColor=dark,
+                                fontName='Helvetica', spaceAfter=3, leading=13)
+    bullet_style = ParagraphStyle('Bullet', parent=styles['Normal'],
+                                  fontSize=9, textColor=grey,
+                                  fontName='Helvetica', leftIndent=14, spaceAfter=2, leading=12)
+
+    # ── NAME ──
+    story.append(Paragraph(cv_data.get('name', 'Professional Resume'), name_style))
+
+    # ── CONTACT LINE ──
+    parts = []
+    if cv_data.get('email'):  parts.append(cv_data['email'])
+    if cv_data.get('phone'):  parts.append(cv_data['phone'])
+    if parts:
+        story.append(Paragraph(' • '.join(parts), contact_style))
+    story.append(HRFlowable(width="100%", color=accent, thickness=1.5, spaceAfter=6))
+
+    # ── PROFESSIONAL SUMMARY ──
+    skills_preview = ', '.join(cv_data.get('skills', [])[:5]) or 'diverse technologies'
+    summary = (
+        f"Results-driven professional with hands-on expertise in <b>{skills_preview}</b>. "
+        f"Passionate about delivering high-quality, scalable solutions and continuously expanding technical skills. "
+        f"Proven track record of collaborating in fast-paced environments to meet and exceed project goals."
+    )
+    story.append(Paragraph("PROFESSIONAL SUMMARY", section_style))
+    story.append(Paragraph(summary, body_style))
+
+    # ── SKILLS ──
+    if cv_data.get('skills'):
+        story.append(Paragraph("SKILLS", section_style))
+        # If job desc provided, prioritise matched skills
+        all_skills = cv_data['skills']
+        story.append(Paragraph(' &nbsp;•&nbsp; '.join(all_skills[:16]), body_style))
+
+    # ── EXPERIENCE ──
+    story.append(Paragraph("PROFESSIONAL EXPERIENCE", section_style))
+    for exp in cv_data.get('experience', [])[:5]:
+        story.append(Paragraph(f"<b>{exp.get('title', 'Role')}</b>", body_style))
+        if exp.get('description'):
+            story.append(Paragraph(f"• {exp['description']}", bullet_style))
+
+    # ── EDUCATION ──
+    if cv_data.get('education'):
+        story.append(Paragraph("EDUCATION", section_style))
+        for edu in cv_data['education'][:3]:
+            story.append(Paragraph(edu, body_style))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ─────────────────────────────────────────────
+# PORTFOLIO HTML + ZIP
+# ─────────────────────────────────────────────
+
+def generate_portfolio(cv_data: Dict) -> bytes:
+    name = cv_data.get('name', 'Professional')
+    email = cv_data.get('email', 'contact@example.com')
+    phone = cv_data.get('phone', '')
+    skills = cv_data.get('skills', ['Software Development', 'Problem Solving'])
+    experience = cv_data.get('experience', [])
+    education = cv_data.get('education', [])
+
+    # ── skills grid cards ──
+    skill_cards = "\n".join([
+        f'''            <div class="skill-card">
+              <div class="skill-icon">{s[0].upper()}</div>
+              <span>{s}</span>
+            </div>'''
+        for s in skills[:16]
+    ])
+
+    # ── experience timeline items ──
+    exp_items = "\n".join([
+        f'''            <div class="timeline-item">
+              <div class="timeline-dot"></div>
+              <div class="timeline-content">
+                <h3>{e.get('title', 'Role')}</h3>
+                <p>{e.get('description', 'Delivered impactful results in a professional setting.')}</p>
+              </div>
+            </div>'''
+        for e in experience[:5]
+    ])
+
+    # ── education list ──
+    edu_items = "\n".join([f'            <li>{e}</li>' for e in education[:4]])
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{name} — Portfolio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+  <style>
+    /* ─── reset & base ─── */
+    *, *::before, *::after {{ box-sizing:border-box; margin:0; padding:0; }}
+    :root {{
+      --clr-bg:      #0f1117;
+      --clr-surface: #1a1d27;
+      --clr-accent:  #e94560;
+      --clr-accent2: #c23152;
+      --clr-text:    #e2e4e9;
+      --clr-muted:   #7a7f8e;
+      --font-head:   'Syne', sans-serif;
+      --font-body:   'Inter', sans-serif;
+    }}
+    html {{ scroll-behavior:smooth; }}
+    body {{
+      font-family: var(--font-body);
+      background: var(--clr-bg);
+      color: var(--clr-text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }}
+
+    /* ─── nav ─── */
+    nav {{
+      position:fixed; top:0; width:100%; z-index:100;
+      background:rgba(15,17,23,.85);
+      backdrop-filter:blur(12px);
+      border-bottom:1px solid rgba(233,69,96,.15);
+      padding:.9rem 0;
+      transition: background .3s;
+    }}
+    .nav-inner {{
+      max-width:1100px; margin:0 auto; padding:0 1.5rem;
+      display:flex; justify-content:space-between; align-items:center;
+    }}
+    .nav-logo {{
+      font-family:var(--font-head); font-size:1.3rem;
+      color:#fff; text-decoration:none; letter-spacing:-0.5px;
+    }}
+    .nav-links a {{
+      color:var(--clr-muted); text-decoration:none;
+      margin-left:1.8rem; font-size:.85rem; font-weight:500;
+      letter-spacing:.5px; text-transform:uppercase;
+      transition:color .2s;
+    }}
+    .nav-links a:hover {{ color:var(--clr-accent); }}
+
+    /* ─── hero ─── */
+    .hero {{
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      position:relative; overflow:hidden;
+      padding:7rem 1.5rem 4rem;
+    }}
+    .hero-bg {{
+      position:absolute; inset:0; z-index:0;
+      background:
+        radial-gradient(ellipse 80% 50% at 20% 80%, rgba(233,69,96,.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 20%, rgba(26,29,39,.8) 0%, transparent 70%);
+    }}
+    .hero-content {{
+      position:relative; z-index:1;
+      text-align:center; max-width:720px;
+    }}
+    .hero-content h1 {{
+      font-family:var(--font-head);
+      font-size:clamp(2.8rem,7vw,5.5rem);
+      font-weight:800; line-height:1.05;
+      letter-spacing:-2px; color:#fff;
+      margin-bottom:.6rem;
+    }}
+    .hero-content h1 span {{ color:var(--clr-accent); }}
+    .hero-subtitle {{
+      color:var(--clr-muted); font-size:1.1rem; font-weight:300;
+      max-width:500px; margin:0 auto 2rem;
+    }}
+    .btn {{
+      display:inline-block; padding:.75rem 2rem;
+      background:var(--clr-accent); color:#fff;
+      border:none; border-radius:6px;
+      font-family:var(--font-body); font-size:.88rem;
+      font-weight:600; letter-spacing:.4px; text-transform:uppercase;
+      text-decoration:none; cursor:pointer;
+      transition:background .25s, transform .2s;
+    }}
+    .btn:hover {{ background:var(--clr-accent2); transform:translateY(-2px); }}
+
+    /* ─── sections common ─── */
+    section {{ padding:6rem 1.5rem; }}
+    .container {{ max-width:1050px; margin:0 auto; }}
+    .section-label {{
+      font-size:.75rem; color:var(--clr-accent);
+      letter-spacing:3px; text-transform:uppercase;
+      font-weight:600; margin-bottom:.5rem;
+    }}
+    .section-title {{
+      font-family:var(--font-head); font-size:clamp(1.8rem,4vw,2.6rem);
+      font-weight:800; color:#fff; margin-bottom:2.5rem;
+      letter-spacing:-1px;
+    }}
+
+    /* ─── about ─── */
+    #about {{ background:var(--clr-surface); }}
+    .about-grid {{
+      display:grid; grid-template-columns:1fr 1fr; gap:3rem;
+      align-items:center;
+    }}
+    .about-text p {{
+      color:var(--clr-muted); font-size:1rem; margin-bottom:1rem;
+    }}
+    .about-stats {{
+      display:grid; grid-template-columns:1fr 1fr; gap:1.2rem;
+    }}
+    .stat-card {{
+      background:var(--clr-bg); border:1px solid rgba(233,69,96,.15);
+      border-radius:10px; padding:1.4rem; text-align:center;
+    }}
+    .stat-card .num {{
+      font-family:var(--font-head); font-size:1.9rem;
+      color:var(--clr-accent); font-weight:800;
+    }}
+    .stat-card .label {{
+      color:var(--clr-muted); font-size:.78rem; margin-top:.2rem;
+      text-transform:uppercase; letter-spacing:1px;
+    }}
+
+    /* ─── skills ─── */
+    .skills-grid {{
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(140px,1fr));
+      gap:1rem;
+    }}
+    .skill-card {{
+      background:var(--clr-surface);
+      border:1px solid rgba(233,69,96,.1);
+      border-radius:10px; padding:1.3rem .8rem;
+      text-align:center; transition:transform .2s, border-color .2s;
+    }}
+    .skill-card:hover {{
+      transform:translateY(-3px);
+      border-color:var(--clr-accent);
+    }}
+    .skill-icon {{
+      width:36px; height:36px; border-radius:8px;
+      background:linear-gradient(135deg, var(--clr-accent), var(--clr-accent2));
+      color:#fff; font-weight:700; font-size:1rem;
+      display:flex; align-items:center; justify-content:center;
+      margin:0 auto .6rem;
+    }}
+    .skill-card span {{
+      font-size:.82rem; color:var(--clr-muted); font-weight:500;
+    }}
+
+    /* ─── experience timeline ─── */
+    #experience {{ background:var(--clr-surface); }}
+    .timeline {{ position:relative; padding-left:2rem; }}
+    .timeline::before {{
+      content:''; position:absolute; left:.75rem; top:0; bottom:0;
+      width:2px; background:rgba(233,69,96,.25);
+    }}
+    .timeline-item {{ position:relative; margin-bottom:2rem; }}
+    .timeline-dot {{
+      position:absolute; left:-1.3rem; top:.35rem;
+      width:12px; height:12px; border-radius:50%;
+      background:var(--clr-accent);
+      box-shadow:0 0 8px rgba(233,69,96,.4);
+    }}
+    .timeline-content {{
+      background:var(--clr-bg); border:1px solid rgba(233,69,96,.1);
+      border-radius:10px; padding:1.3rem 1.5rem;
+    }}
+    .timeline-content h3 {{
+      color:#fff; font-size:1rem; font-weight:600; margin-bottom:.3rem;
+    }}
+    .timeline-content p {{
+      color:var(--clr-muted); font-size:.85rem;
+    }}
+
+    /* ─── education ─── */
+    .edu-list {{
+      list-style:none; padding:0;
+    }}
+    .edu-list li {{
+      background:var(--clr-surface); border:1px solid rgba(233,69,96,.1);
+      border-radius:10px; padding:1rem 1.4rem; margin-bottom:.7rem;
+      color:var(--clr-muted); font-size:.9rem;
+    }}
+    .edu-list li::before {{
+      content:'🎓 '; 
+    }}
+
+    /* ─── contact ─── */
+    #contact {{
+      background:linear-gradient(135deg, #12151f 0%, #1a1d27 100%);
+      text-align:center;
+    }}
+    .contact-info {{
+      display:flex; justify-content:center; gap:2.5rem;
+      flex-wrap:wrap; margin-top:1.5rem;
+    }}
+    .contact-item {{
+      color:var(--clr-muted); font-size:.9rem;
+    }}
+    .contact-item strong {{ color:#fff; }}
+
+    /* ─── footer ─── */
+    footer {{
+      text-align:center; padding:2rem;
+      color:var(--clr-muted); font-size:.78rem;
+      border-top:1px solid rgba(255,255,255,.06);
+    }}
+
+    /* ─── responsive ─── */
+    @media (max-width:680px) {{
+      .about-grid {{ grid-template-columns:1fr; }}
+      .nav-links a {{ margin-left:.9rem; font-size:.75rem; }}
+      .skills-grid {{ grid-template-columns:repeat(auto-fill, minmax(110px,1fr)); }}
+    }}
+
+    /* ─── animations ─── */
+    @keyframes fadeUp {{
+      from {{ opacity:0; transform:translateY(24px); }}
+      to   {{ opacity:1; transform:translateY(0); }}
+    }}
+    .fade-up {{ animation:fadeUp .6s ease both; }}
+    .delay-1 {{ animation-delay:.1s; }}
+    .delay-2 {{ animation-delay:.2s; }}
+    .delay-3 {{ animation-delay:.35s; }}
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="nav-logo">{name}</a>
+    <div class="nav-links">
+      <a href="#about">About</a>
+      <a href="#skills">Skills</a>
+      <a href="#experience">Experience</a>
+      <a href="#contact">Contact</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-bg"></div>
+  <div class="hero-content fade-up">
+    <h1>Hi, I'm <span>{name}</span></h1>
+    <p class="hero-subtitle">
+      A passionate professional crafting innovative solutions and delivering exceptional results.
+    </p>
+    <a href="#contact" class="btn">Get In Touch</a>
+  </div>
+</section>
+
+<!-- ABOUT -->
+<section id="about">
+  <div class="container">
+    <div class="about-grid">
+      <div class="about-text fade-up">
+        <p class="section-label">About Me</p>
+        <h2 class="section-title">Building things<br/>that matter.</h2>
+        <p>
+          Results-driven professional with deep expertise in {', '.join(skills[:3])}.
+          I thrive on solving complex problems and turning ideas into polished, scalable products.
+        </p>
+        <p>
+          Passionate about continuous learning, clean code, and creating experiences
+          that delight users. Always looking for the next challenge.
+        </p>
+      </div>
+      <div class="about-stats fade-up delay-2">
+        <div class="stat-card">
+          <div class="num">{len(skills)}</div>
+          <div class="label">Skills</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">{len(experience)}</div>
+          <div class="label">Roles</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">{len(education)}</div>
+          <div class="label">Education</div>
+        </div>
+        <div class="stat-card">
+          <div class="num">∞</div>
+          <div class="label">Curiosity</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SKILLS -->
+<section id="skills">
+  <div class="container">
+    <p class="section-label fade-up">Expertise</p>
+    <h2 class="section-title fade-up delay-1">Skills & Tools</h2>
+    <div class="skills-grid fade-up delay-2">
+{skill_cards}
+    </div>
+  </div>
+</section>
+
+<!-- EXPERIENCE -->
+<section id="experience">
+  <div class="container">
+    <p class="section-label fade-up">Career</p>
+    <h2 class="section-title fade-up delay-1">Experience</h2>
+    <div class="timeline fade-up delay-2">
+{exp_items}
+    </div>
+  </div>
+</section>
+
+<!-- EDUCATION -->
+<section id="education">
+  <div class="container">
+    <p class="section-label fade-up">Learning</p>
+    <h2 class="section-title fade-up delay-1">Education</h2>
+    <ul class="edu-list fade-up delay-2">
+{edu_items}
+    </ul>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section id="contact">
+  <div class="container">
+    <p class="section-label fade-up">Let's connect</p>
+    <h2 class="section-title fade-up delay-1">Get In Touch</h2>
+    <p class="fade-up delay-2" style="color:var(--clr-muted); max-width:480px; margin:0 auto;">
+      Interested in working together or just want to say hi? I'd love to hear from you.
+    </p>
+    <div class="contact-info fade-up delay-3">
+      <div class="contact-item">📧 <strong>{email}</strong></div>
+      {"<div class='contact-item'>📱 <strong>" + phone + "</strong></div>" if phone else ""}
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <p>&copy; {datetime.datetime.now().year} {name} — Portfolio generated by CareerBoost AI</p>
+</footer>
+
+</body>
+</html>"""
+
+    # ── package into ZIP ──
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('index.html', html)
+        zf.writestr('README.md',
+            f"# {name} — Portfolio\n\n"
+            f"Generated by CareerBoost AI on {datetime.datetime.now().strftime('%Y-%m-%d')}.\n\n"
+            f"## Deploy (all free)\n"
+            f"1. **GitHub Pages** — push to a repo, enable Pages\n"
+            f"2. **Netlify** — drag & drop the folder\n"
+            f"3. **Vercel** — connect your GitHub repo\n"
+        )
+    buf.seek(0)
+    return buf.getvalue()
